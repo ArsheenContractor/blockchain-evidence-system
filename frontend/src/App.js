@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ethers } from "ethers";
+import axios from "axios";
 
 const CONTRACT_ADDRESS = "0xB3969ec127aC5837e7336ed9611d490714c61F9A";
 
@@ -11,58 +12,89 @@ const ABI = [
 
 function App() {
   const [account, setAccount] = useState("");
-  const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
   const [evidenceList, setEvidenceList] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // 🔥 NEW
   const [searchId, setSearchId] = useState("");
   const [singleEvidence, setSingleEvidence] = useState(null);
 
+  const [file, setFile] = useState(null);
+  const [cid, setCid] = useState("");
+
   // 🔹 Connect Wallet
   const connectWallet = async () => {
+    if (!window.ethereum) {
+      alert("MetaMask not installed");
+      return;
+    }
+
+    const accounts = await window.ethereum.request({
+      method: "eth_requestAccounts",
+    });
+
+    setAccount(accounts[0]);
+  };
+
+  // 🔹 Upload to IPFS
+  const uploadToIPFS = async () => {
     try {
-      if (!window.ethereum) {
-        alert("MetaMask not installed");
-        return;
-      }
+      const formData = new FormData();
+      formData.append("file", file);
 
-      const accounts = await window.ethereum.request({
-        method: "eth_requestAccounts",
-      });
+      const res = await axios.post(
+        "https://api.pinata.cloud/pinning/pinFileToIPFS",
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+            pinata_api_key: "",
+            pinata_secret_api_key: "",
+          },
+        }
+      );
 
-      setAccount(accounts[0]);
+      const uploadedCID = res.data.IpfsHash;
+      setCid(uploadedCID);
+
+      return uploadedCID;
     } catch (err) {
       console.error(err);
+      setStatus("❌ IPFS upload failed");
     }
   };
 
-  // 🔹 Add Evidence
+  // 🔥 UPDATED — Add Evidence (IPFS + Blockchain)
   const addEvidence = async () => {
     try {
-      if (!input) {
-        alert("Enter evidence");
+      if (!file) {
+        alert("Upload a file first");
         return;
       }
 
       setLoading(true);
-      setStatus("Sending transaction...");
+      setStatus("📤 Uploading to IPFS...");
+
+      const uploadedCID = await uploadToIPFS();
+
+      setStatus("🔐 Generating hash...");
+
+      const hash = ethers.keccak256(
+        ethers.toUtf8Bytes(uploadedCID)
+      );
+
+      setStatus("⛓ Storing on blockchain...");
 
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
 
       const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 
-      const hash = ethers.keccak256(
-        ethers.toUtf8Bytes(input)
-      );
-
       const tx = await contract.addEvidence(hash);
       await tx.wait();
 
       setStatus("✅ Evidence stored successfully");
-      setInput("");
+
     } catch (err) {
       console.error(err);
       setStatus("❌ Transaction failed");
@@ -73,33 +105,29 @@ function App() {
 
   // 🔹 Fetch ALL Evidence
   const fetchAllEvidence = async () => {
-    try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 
-      const count = await contract.evidenceCount();
+    const count = await contract.evidenceCount();
 
-      let list = [];
+    let list = [];
 
-      for (let i = 1; i <= count; i++) {
-        const e = await contract.getEvidence(i);
+    for (let i = 1; i <= count; i++) {
+      const e = await contract.getEvidence(i);
 
-        list.push({
-          id: i,
-          hash: e.fileHash,
-          owner: e.owner,
-          timestamp: e.timestamp.toString(),
-        });
-      }
-
-      setEvidenceList(list);
-      setSingleEvidence(null); // clear single view
-    } catch (err) {
-      console.error(err);
+      list.push({
+        id: i,
+        hash: e.fileHash,
+        owner: e.owner,
+        timestamp: e.timestamp.toString(),
+      });
     }
+
+    setEvidenceList(list);
+    setSingleEvidence(null);
   };
 
-  // 🔥 NEW — Fetch by ID
+  // 🔹 Fetch by ID
   const getEvidenceById = async () => {
     try {
       if (!searchId) {
@@ -119,7 +147,7 @@ function App() {
         timestamp: data.timestamp.toString(),
       });
 
-      setEvidenceList([]); // clear list view
+      setEvidenceList([]);
     } catch (err) {
       console.error(err);
       alert("Invalid ID");
@@ -135,28 +163,39 @@ function App() {
 
       <hr />
 
-      {/* Add Evidence */}
+      {/* 🔥 FILE UPLOAD */}
       <input
-        type="text"
-        placeholder="Enter Evidence (e.g., FIR-2026)"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        style={{ width: "300px", padding: "10px", marginTop: "10px" }}
+        type="file"
+        onChange={(e) => setFile(e.target.files[0])}
       />
 
       <br /><br />
 
       <button onClick={addEvidence} disabled={loading}>
-        {loading ? "Processing..." : "Add Evidence"}
+        {loading ? "Processing..." : "Upload & Store Evidence"}
       </button>
 
       <button onClick={fetchAllEvidence} style={{ marginLeft: "10px" }}>
         Fetch All Evidence
       </button>
 
+      {/* 🔥 CID DISPLAY */}
+      {cid && (
+        <p>
+          📌 CID: {cid} <br />
+          🔗 <a
+            href={`https://gateway.pinata.cloud/ipfs/${cid}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View File
+          </a>
+        </p>
+      )}
+
       <hr />
 
-      {/* 🔥 NEW: Search by ID */}
+      {/* SEARCH */}
       <h3>🔍 Search by ID</h3>
 
       <input
@@ -164,19 +203,18 @@ function App() {
         placeholder="Enter Evidence ID"
         value={searchId}
         onChange={(e) => setSearchId(e.target.value)}
-        style={{ padding: "8px" }}
       />
 
-      <button onClick={getEvidenceById} style={{ marginLeft: "10px" }}>
-        Get Evidence by ID
+      <button onClick={getEvidenceById}>
+        Get Evidence
       </button>
 
       <hr />
 
-      {/* 🔥 Single Evidence View */}
+      {/* SINGLE */}
       {singleEvidence && (
         <div>
-          <h3>📌 Selected Evidence</h3>
+          <h3>📌 Evidence</h3>
           <p>ID: {singleEvidence.id}</p>
           <p>Hash: {singleEvidence.hash}</p>
           <p>Owner: {singleEvidence.owner}</p>
@@ -185,21 +223,16 @@ function App() {
         </div>
       )}
 
-      {/* 🔥 All Evidence List */}
-      {evidenceList.length > 0 && (
-        <>
-          <h3>📄 All Evidence Records</h3>
-          {evidenceList.map((e) => (
-            <div key={e.id}>
-              <p>ID: {e.id}</p>
-              <p>Hash: {e.hash}</p>
-              <p>Owner: {e.owner}</p>
-              <p>Timestamp: {e.timestamp}</p>
-              <hr />
-            </div>
-          ))}
-        </>
-      )}
+      {/* ALL */}
+      {evidenceList.map((e) => (
+        <div key={e.id}>
+          <p>ID: {e.id}</p>
+          <p>Hash: {e.hash}</p>
+          <p>Owner: {e.owner}</p>
+          <p>Timestamp: {e.timestamp}</p>
+          <hr />
+        </div>
+      ))}
 
       <p>{status}</p>
     </div>
