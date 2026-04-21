@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ethers } from "ethers";
-import axios from "axios";
 
 const CONTRACT_ADDRESS = "0xB3969ec127aC5837e7336ed9611d490714c61F9A";
 
@@ -17,10 +16,20 @@ function App() {
   const [loading, setLoading] = useState(false);
 
   const [searchId, setSearchId] = useState("");
-  const [singleEvidence, setSingleEvidence] = useState(null);
 
   const [file, setFile] = useState(null);
   const [cid, setCid] = useState("");
+
+  // 🔥 NEW STATE (IMPORTANT)
+  const [result, setResult] = useState(null);
+
+  // 🔥 Metadata states
+  const [caseName, setCaseName] = useState("");
+  const [description, setDescription] = useState("");
+  const [type, setType] = useState("");
+  const [location, setLocation] = useState("");
+  const [date, setDate] = useState("");
+  const [suspect, setSuspect] = useState("");
 
   // 🔹 Connect Wallet
   const connectWallet = async () => {
@@ -36,74 +45,139 @@ function App() {
     setAccount(accounts[0]);
   };
 
-  // 🔹 Upload to IPFS
+  // 🔥 Upload file
   const uploadToIPFS = async () => {
     try {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await axios.post(
-        "https://api.pinata.cloud/pinning/pinFileToIPFS",
-        formData,
-        {
-          headers: {
-            "Content-Type": "multipart/form-data",
-            pinata_api_key: "",
-            pinata_secret_api_key: "",
-          },
-        }
-      );
+      const res = await fetch("http://localhost:5000/upload", {
+        method: "POST",
+        body: formData,
+      });
 
-      const uploadedCID = res.data.IpfsHash;
-      setCid(uploadedCID);
+      const data = await res.json();
 
-      return uploadedCID;
+      if (!data.cid) throw new Error("CID not received");
+
+      setCid(data.cid);
+      return data.cid;
+
     } catch (err) {
       console.error(err);
-      setStatus("❌ IPFS upload failed");
+      setStatus("❌ File upload failed");
+      return null;
     }
   };
 
-  // 🔥 UPDATED — Add Evidence (IPFS + Blockchain)
-  const addEvidence = async () => {
+  // 🔥 Upload metadata
+  const uploadMetadata = async (metadata) => {
     try {
-      if (!file) {
-        alert("Upload a file first");
-        return;
-      }
+      const res = await fetch("http://localhost:5000/uploadMetadata", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(metadata),
+      });
 
-      setLoading(true);
-      setStatus("📤 Uploading to IPFS...");
+      const data = await res.json();
 
-      const uploadedCID = await uploadToIPFS();
+      if (!data.metadataCID) throw new Error("Metadata CID not received");
 
-      setStatus("🔐 Generating hash...");
-
-      const hash = ethers.keccak256(
-        ethers.toUtf8Bytes(uploadedCID)
-      );
-
-      setStatus("⛓ Storing on blockchain...");
-
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
-
-      const tx = await contract.addEvidence(hash);
-      await tx.wait();
-
-      setStatus("✅ Evidence stored successfully");
+      return data.metadataCID;
 
     } catch (err) {
       console.error(err);
-      setStatus("❌ Transaction failed");
-    } finally {
-      setLoading(false);
+      setStatus("❌ Metadata upload failed");
+      return null;
     }
   };
+  
+  // 🔥 Add Evidence
+  const addEvidence = async () => {
+  // 🔥 FIX 1: guard INSIDE function
+  if (loading) {
+    console.log("⛔ Blocked duplicate click");
+    return;
+  }
 
-  // 🔹 Fetch ALL Evidence
+  try {
+    console.log("🚀 addEvidence called");
+
+    if (!file) {
+      alert("Upload file");
+      return;
+    }
+
+    if (!caseName || !description || !type || !location || !date || !suspect) {
+      alert("Fill all fields");
+      return;
+    }
+
+    setLoading(true);
+
+    // 1️⃣ Upload file
+    const fileCID = await uploadToIPFS();
+    if (!fileCID) {
+      setLoading(false);
+      return;
+    }
+
+    // 2️⃣ Create metadata
+    const metadata = {
+      caseName,
+      description,
+      type,
+      location,
+      date,
+      suspect,
+      fileCID
+    };
+
+    // 3️⃣ Upload metadata
+    const metadataCID = await uploadMetadata(metadata);
+    if (!metadataCID) {
+      setLoading(false);
+      return;
+    }
+
+    // 4️⃣ Generate hash
+    const hash = ethers.keccak256(
+      ethers.toUtf8Bytes(metadataCID)
+    );
+
+    // 5️⃣ Blockchain transaction
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+    console.log("⛓ Sending transaction...");
+    const tx = await contract.addEvidence(hash);
+    await tx.wait();
+
+    // 6️⃣ Save mapping
+    await fetch("http://localhost:5000/storeMapping", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        hash,
+        metadataCID
+      })
+    });
+
+    setStatus("✅ Evidence stored successfully");
+
+  } catch (err) {
+    console.error(err);
+    setStatus("❌ Transaction failed");
+  } finally {
+    setLoading(false);
+  }
+};
+  // 🔹 Fetch all
   const fetchAllEvidence = async () => {
     const provider = new ethers.BrowserProvider(window.ethereum);
     const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
@@ -124,38 +198,34 @@ function App() {
     }
 
     setEvidenceList(list);
-    setSingleEvidence(null);
+    setResult(null);
   };
 
-  // 🔹 Fetch by ID
+  // 🔥 FIXED: ID → FULL DETAILS
   const getEvidenceById = async () => {
     try {
-      if (!searchId) {
-        alert("Enter ID");
-        return;
-      }
+      if (!searchId) return;
 
       const provider = new ethers.BrowserProvider(window.ethereum);
       const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 
       const data = await contract.getEvidence(searchId);
+      const hash = data.fileHash;
 
-      setSingleEvidence({
-        id: searchId,
-        hash: data.fileHash,
-        owner: data.owner,
-        timestamp: data.timestamp.toString(),
-      });
+      // 🔥 FETCH FULL DATA FROM BACKEND
+      const res = await fetch(`http://localhost:5000/evidence/${hash}`);
+      const resultData = await res.json();
 
-      setEvidenceList([]);
+      setResult(resultData);
+
     } catch (err) {
       console.error(err);
-      alert("Invalid ID");
+      setStatus("❌ Failed to fetch full evidence");
     }
   };
 
   return (
-    <div style={{ padding: "30px", fontFamily: "Arial" }}>
+    <div style={{ padding: "30px" }}>
       <h1>🔐 Blockchain Evidence System</h1>
 
       <button onClick={connectWallet}>Connect Wallet</button>
@@ -163,31 +233,34 @@ function App() {
 
       <hr />
 
-      {/* 🔥 FILE UPLOAD */}
-      <input
-        type="file"
-        onChange={(e) => setFile(e.target.files[0])}
-      />
+      <input placeholder="Case Name" onChange={(e) => setCaseName(e.target.value)} />
+      <input placeholder="Description" onChange={(e) => setDescription(e.target.value)} />
+      <input placeholder="Type" onChange={(e) => setType(e.target.value)} />
+      <input placeholder="Location" onChange={(e) => setLocation(e.target.value)} />
+      <input type="date" onChange={(e) => setDate(e.target.value)} />
+      <input placeholder="Suspect" onChange={(e) => setSuspect(e.target.value)} />
 
       <br /><br />
 
-      <button onClick={addEvidence} disabled={loading}>
-        {loading ? "Processing..." : "Upload & Store Evidence"}
+      <input type="file" onChange={(e) => setFile(e.target.files[0])} />
+
+      <br /><br />
+
+      <button
+      onClick={addEvidence}
+      disabled={loading}
+      >
+      {loading ? "Processing..." : "Add Evidence"}
       </button>
 
-      <button onClick={fetchAllEvidence} style={{ marginLeft: "10px" }}>
-        Fetch All Evidence
-      </button>
+      <button onClick={fetchAllEvidence}>Fetch All</button>
 
-      {/* 🔥 CID DISPLAY */}
+      <hr />
+
       {cid && (
         <p>
-          📌 CID: {cid} <br />
-          🔗 <a
-            href={`https://gateway.pinata.cloud/ipfs/${cid}`}
-            target="_blank"
-            rel="noreferrer"
-          >
+          CID: {cid} <br />
+          <a href={`https://gateway.pinata.cloud/ipfs/${cid}`} target="_blank" rel="noreferrer">
             View File
           </a>
         </p>
@@ -195,42 +268,41 @@ function App() {
 
       <hr />
 
-      {/* SEARCH */}
       <h3>🔍 Search by ID</h3>
-
-      <input
-        type="number"
-        placeholder="Enter Evidence ID"
-        value={searchId}
-        onChange={(e) => setSearchId(e.target.value)}
-      />
-
-      <button onClick={getEvidenceById}>
-        Get Evidence
-      </button>
+      <input value={searchId} onChange={(e) => setSearchId(e.target.value)} />
+      <button onClick={getEvidenceById}>Get</button>
 
       <hr />
 
-      {/* SINGLE */}
-      {singleEvidence && (
-        <div>
-          <h3>📌 Evidence</h3>
-          <p>ID: {singleEvidence.id}</p>
-          <p>Hash: {singleEvidence.hash}</p>
-          <p>Owner: {singleEvidence.owner}</p>
-          <p>Timestamp: {singleEvidence.timestamp}</p>
-          <hr />
-        </div>
-      )}
+      {/* 🔥 FULL RESULT DISPLAY */}
+      {result && result.metadata && (
+  <div>
+    <h3>📄 Evidence Details</h3>
 
-      {/* ALL */}
+    <p><b>Case:</b> {result.metadata.caseName}</p>
+    <p><b>Description:</b> {result.metadata.description}</p>
+    <p><b>Type:</b> {result.metadata.type}</p>
+    <p><b>Location:</b> {result.metadata.location}</p>
+    <p><b>Date:</b> {result.metadata.date}</p>
+    <p><b>Suspect:</b> {result.metadata.suspect}</p>
+
+    <a
+      href={`https://gateway.pinata.cloud/ipfs/${result.metadata.fileCID}`}
+      target="_blank"
+      rel="noreferrer"
+    >
+      View Evidence File
+    </a>
+  </div>
+)}
+      <hr />
+
       {evidenceList.map((e) => (
         <div key={e.id}>
           <p>ID: {e.id}</p>
           <p>Hash: {e.hash}</p>
           <p>Owner: {e.owner}</p>
           <p>Timestamp: {e.timestamp}</p>
-          <hr />
         </div>
       ))}
 
